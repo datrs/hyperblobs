@@ -16,8 +16,7 @@ println!("This line is");
 use std::{ops::Rem, time::Duration};
 
 use derive_builder::Builder;
-use hypercore::replication::{CoreMethods, CoreMethodsError};
-use replicator::ReplicatingCore;
+use hypercore::{Hypercore, HypercoreError};
 use tracing::instrument;
 
 const DEFAULT_BLOCK_SIZE: u64 = 64 * 1024;
@@ -25,9 +24,9 @@ const DEFAULT_BLOCK_SIZE: u64 = 64 * 1024;
 #[derive(Debug, thiserror::Error)]
 /// Errors for [`Hyperblobs`].
 pub enum Error {
-    #[error("Error in CoreMethods")]
-    /// Error in CoreMethods
-    CoreMethodsError(#[from] CoreMethodsError),
+    #[error("Error from hypercore")]
+    /// Error from hypercore
+    HypercoreError(#[from] HypercoreError),
 }
 type Result<T> = std::result::Result<T, Error>;
 
@@ -104,7 +103,7 @@ pub struct Hyperblobs {
     /// The block size that will be used when storing blobs
     #[builder(default = "DEFAULT_BLOCK_SIZE")]
     block_size: u64,
-    core: ReplicatingCore,
+    core: Hypercore,
 }
 
 impl HyperblobsBuilder {
@@ -189,7 +188,7 @@ mod tests {
             .unwrap();
         HyperblobsBuilder::default()
             .block_size(block_size)
-            .core(core.into())
+            .core(core)
             .build()
             .unwrap()
     }

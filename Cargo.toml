@@ -11,12 +11,6 @@ tracing = "0.1.40"
 tokio = { version = "1.37.0", features = ["full"] }
 
 [dependencies.hypercore]
-#path = "../core"
-git = "https://github.com/cowlicks/hypercore.git"
-branch = "replication"
+path = "../core"
 default-features = false
-features = ["sparse", "tokio"]
-
-[dependencies.replicator]
-#path = "../replicator/replicator"
-git = "https://github.com/cowlicks/replicator.git"
+features = ["sparse", "replication"]
