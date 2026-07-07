@@ -17,6 +17,7 @@ use std::{ops::Rem, time::Duration};
 
 use derive_builder::Builder;
 use hypercore::{Hypercore, HypercoreError};
+use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 const DEFAULT_BLOCK_SIZE: u64 = 64 * 1024;
@@ -53,7 +54,11 @@ pub struct GetOptions {
 }
 
 /// Result of [`Hyperblobs::put`] used for fetching data with [`Hyperblobs::get`].
-#[derive(Debug, Clone)]
+///
+/// Serialized as `camelCase` JSON to match the shape JS's `hyperblobs` uses when this id is
+/// stored as a value elsewhere (e.g. hyper-rss's `KeyedBlobs`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PutBlob {
     /// Number of bytes before the blob
     pub byte_offset: u64,
