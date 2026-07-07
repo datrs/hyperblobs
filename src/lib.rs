@@ -17,6 +17,7 @@ use std::{ops::Rem, time::Duration};
 
 use derive_builder::Builder;
 use hypercore::{Hypercore, HypercoreError};
+use hypercore_handshake::CipherTrait;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -116,6 +117,12 @@ impl HyperblobsBuilder {
 }
 
 impl Hyperblobs {
+    /// Add a replication stream for the underlying Hypercore.
+    pub async fn add_stream(&self, stream: impl CipherTrait + 'static) -> Result<()> {
+        tokio::spawn(self.core.replicate(stream));
+        Ok(())
+    }
+
     /// Insert a blob into the store
     #[instrument]
     pub async fn put(&self, blob: &[u8], _opts: &PutOptions) -> Result<PutBlob> {

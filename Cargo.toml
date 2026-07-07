@@ -8,6 +8,7 @@ derive_builder = "0.20.1"
 thiserror = "1.0.63"
 tracing = "0.1.40"
 serde = { version = "1", features = ["derive"] }
+hypercore_handshake = "0.6.0"
 # TODO rm unused features
 tokio = { version = "1.37.0", features = ["full"] }
 
