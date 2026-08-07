@@ -13,6 +13,6 @@ hypercore_handshake = "0.6.0"
 tokio = { version = "1.37.0", features = ["full"] }
 
 [dependencies.hypercore]
-path = "../core"
+version = "0.17.0-alpha.1"
 default-features = false
 features = ["sparse", "replication"]
