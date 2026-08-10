@@ -719,6 +719,7 @@ name = "hyperblobs"
 version = "0.1.0"
 dependencies = [
  "derive_builder",
+ "futures-lite 2.6.1",
  "hypercore",
  "hypercore_handshake",
  "serde",
@@ -729,7 +730,9 @@ dependencies = [
 
 [[package]]
 name = "hypercore"
-version = "0.16.0"
+version = "0.17.0-alpha.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce1f29563ab91172fedee5906b09974533f6c8a16b8523cf53155b96d8457938"
 dependencies = [
  "async-broadcast",
  "blake2",
@@ -758,9 +761,9 @@ dependencies = [
 
 [[package]]
 name = "hypercore-protocol"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64765be45c536773760c99d8bede6f063a19ef491766c4ec492120c419591bf8"
+checksum = "ac63d6bdb715a1698f9fb70990fa0ce0a9b7c82bd2e2852b19d3fdc26dc6ed9d"
 dependencies = [
  "async-channel",
  "blake2",
