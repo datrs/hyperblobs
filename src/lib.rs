@@ -161,6 +161,19 @@ impl HyperblobsBuilder {
 }
 
 impl Hyperblobs {
+    /// The [`Hypercore`] the blobs are stored in, the equivalent of JS's `blobs.core`.
+    ///
+    /// Blobs are stored back to back as plain blocks, so this is how you get at the raw blocks a
+    /// blob is made of, or at the core's key in order to replicate it.
+    pub fn core(&self) -> &Hypercore {
+        &self.core
+    }
+
+    /// The size blobs are chunked into blocks at, the equivalent of JS's `blobs.blockSize`.
+    pub fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
     /// Add a replication stream for the underlying Hypercore.
     pub async fn add_stream(&self, stream: impl CipherTrait + 'static) -> Result<()> {
         tokio::spawn(self.core.replicate(stream));
@@ -401,7 +414,10 @@ mod tests {
         let id = blobs.put(data, &Default::default()).await?;
 
         let got = chunks(&blobs, &id, &Default::default()).await?;
-        assert_eq!(got, vec![b"abcd".to_vec(), b"efgh".to_vec(), b"ij".to_vec()]);
+        assert_eq!(
+            got,
+            vec![b"abcd".to_vec(), b"efgh".to_vec(), b"ij".to_vec()]
+        );
         Ok(())
     }
 
@@ -475,7 +491,11 @@ mod tests {
             opts(None, None, Some(u64::MAX)),
         ] {
             let got = blobs.get(&id_a, &o).await?;
-            assert_eq!(got, vec![b'a'; 20], "over-long range escaped the blob: {o:?}");
+            assert_eq!(
+                got,
+                vec![b'a'; 20],
+                "over-long range escaped the blob: {o:?}"
+            );
         }
 
         // Empty and inverted ranges yield nothing rather than erroring or overrunning.

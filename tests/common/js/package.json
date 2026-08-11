@@ -1,0 +1,11 @@
+{
+  "name": "hyperblobs_js_integration",
+  "version": "1.0.0",
+  "license": "MIT",
+  "private": true,
+  "dependencies": {
+    "hyperblobs": "2.8.0",
+    "hypercore": "^10.37.18",
+    "random-access-memory": "^6.2.1"
+  }
+}
