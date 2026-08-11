@@ -34,22 +34,31 @@ pub enum Error {
     /// The equivalent of JS hyperblobs' `BLOCK_NOT_AVAILABLE`.
     #[error("Block [{0}] of the blob is not available")]
     BlockNotAvailable(u64),
-    /// A block was shorter than the range being read requires it to be. This means the blob was
-    /// written with a smaller `block_size` than the [`Hyperblobs`] reading it is configured with,
-    /// or the block's data is truncated.
+    /// A block was shorter than the range being read requires it to be, so the read could make no
+    /// progress. [`Hyperblobs::read_stream`] locates the block holding a range's first byte by
+    /// assuming the blob is chunked at a fixed size, which is true of anything [`Hyperblobs::put`]
+    /// wrote. This is what a core whose blocks were appended by hand at varying sizes looks like
+    /// from the inside.
     #[error("Block [{0}] of the blob is shorter than expected")]
     ShortBlock(u64),
 }
 type Result<T> = std::result::Result<T, Error>;
 
-/// Options for [`Hyperblobs::put`]
+/// Options for [`Hyperblobs::put`].
+///
+/// JS's README also documents `start`, `end` and `length` here, but its `put` never reads them: it
+/// consults `opts.blockSize` and then chunks the whole buffer from zero. They are left out rather
+/// than invented, and in Rust slicing the input at the call site says the same thing.
 #[derive(Debug, Clone, Default, Builder)]
 pub struct PutOptions {
-    /// Relative offset to start within the blob
-    pub start: Option<u64>,
-    /// number of bytes to read
-    pub length: Option<u64>,
-    // We omit the `end` and `block_size` options that JS has.
+    /// Chunk this blob at a different size than the store's own [`Hyperblobs::block_size`], the
+    /// equivalent of JS's `opts.blockSize`. A store can hold blobs written at a mix of sizes: a
+    /// large block size suits a media enclosure being streamed, a small one suits metadata.
+    ///
+    /// `Some(0)` is treated as unset, matching JS, where `0` is falsy and falls through to the
+    /// store's block size.
+    pub block_size: Option<u64>,
+    // We omit the `core` option that JS has.
 }
 
 /// Options for [`Hyperblobs::get`] and [`Hyperblobs::read_stream`].
@@ -169,7 +178,12 @@ impl Hyperblobs {
         &self.core
     }
 
-    /// The size blobs are chunked into blocks at, the equivalent of JS's `blobs.blockSize`.
+    /// The default size blobs are chunked into blocks at, the equivalent of JS's
+    /// `blobs.blockSize`.
+    ///
+    /// This is a *write* setting only, and [`PutOptions::block_size`] overrides it per blob.
+    /// Reading does not consult it: [`Hyperblobs::read_stream`] recovers the size a blob was
+    /// written at from the blob itself, so one store reads back blobs written at any block size.
     pub fn block_size(&self) -> u64 {
         self.block_size
     }
@@ -180,13 +194,16 @@ impl Hyperblobs {
         Ok(())
     }
 
-    /// Insert a blob into the store
+    /// Insert a blob into the store, chunked at [`PutOptions::block_size`] or, failing that, the
+    /// store's own [`Hyperblobs::block_size`].
     #[instrument]
-    pub async fn put(&self, blob: &[u8], _opts: &PutOptions) -> Result<PutBlob> {
-        let blocks: Vec<Vec<u8>> = blob
-            .chunks(self.block_size as usize)
-            .map(Vec::from)
-            .collect();
+    pub async fn put(&self, blob: &[u8], opts: &PutOptions) -> Result<PutBlob> {
+        // As in JS, a `block_size` of zero means "unset" rather than a division by zero.
+        let block_size = opts
+            .block_size
+            .filter(|b| *b > 0)
+            .unwrap_or(self.block_size);
+        let blocks: Vec<Vec<u8>> = blob.chunks(block_size as usize).map(Vec::from).collect();
 
         let byte_length = blob.len() as u64;
         let block_length = blocks.len() as u64;
@@ -232,6 +249,10 @@ impl Hyperblobs {
     /// clamping (see [`GetOptions`]) yields no chunks at all.
     ///
     /// The stream ends after yielding an [`Err`]; it will not retry the failed block.
+    ///
+    /// The store's own [`Hyperblobs::block_size`] is not consulted: the size a blob was chunked at
+    /// is recovered from the blob, so a blob written with [`PutOptions::block_size`], or by a
+    /// differently configured store, still reads back correctly.
     pub fn read_stream<T: Into<GetBlob>>(
         &self,
         id: T,
@@ -243,14 +264,11 @@ impl Hyperblobs {
         } = id.into();
         let (start, end) = opts.range(byte_length);
 
-        // `put` chunks the blob at exactly `block_size`, so the block holding blob-relative byte
-        // `start` can be found arithmetically. JS uses `core.seek` here instead, which Rust's
-        // `Hypercore` does not have; the `ShortBlock` error below covers the case where this
-        // assumption does not hold because the blob was written with a different `block_size`.
         let state = ReadState {
             core: &self.core,
-            index: block_offset + (start / self.block_size),
-            offset: start % self.block_size,
+            seek: (start > 0).then_some(start),
+            index: block_offset,
+            offset: 0,
             read: 0,
             len: end - start,
         };
@@ -259,12 +277,45 @@ impl Hyperblobs {
             if state.read >= state.len {
                 return None;
             }
-            let index = state.index;
 
-            let block = match state.core.get(index).await {
-                Ok(Some(block)) => block,
-                Ok(None) => return Some((Err(Error::BlockNotAvailable(index)), state.done())),
-                Err(e) => return Some((Err(Error::from(e)), state.done())),
+            // Locate the block holding the range's first byte. JS does this with `core.seek`,
+            // which Rust's `Hypercore` has no equivalent of, so it is done arithmetically
+            // instead. A blob is chunked at one fixed size, which makes every block but its last
+            // exactly that size -- so the blob's own first block is what says what size it was
+            // written at, whatever this store is configured with now. Skipped entirely when the
+            // range starts at byte zero, which needs no seek.
+            let mut located = None;
+            if let Some(start) = state.seek.take() {
+                let first = match state.core.get(state.index).await {
+                    Ok(Some(block)) => block,
+                    Ok(None) => {
+                        let index = state.index;
+                        return Some((Err(Error::BlockNotAvailable(index)), state.done()));
+                    }
+                    Err(e) => return Some((Err(Error::from(e)), state.done())),
+                };
+                let block_size = first.len() as u64;
+                if block_size == 0 {
+                    let index = state.index;
+                    return Some((Err(Error::ShortBlock(index)), state.done()));
+                }
+                let skip = start / block_size;
+                state.index += skip;
+                state.offset = start % block_size;
+                // The wanted byte is in the block just read, so don't fetch it a second time.
+                if skip == 0 {
+                    located = Some(first);
+                }
+            }
+
+            let index = state.index;
+            let block = match located {
+                Some(block) => block,
+                None => match state.core.get(index).await {
+                    Ok(Some(block)) => block,
+                    Ok(None) => return Some((Err(Error::BlockNotAvailable(index)), state.done())),
+                    Err(e) => return Some((Err(Error::from(e)), state.done())),
+                },
             };
 
             let offset = state.offset as usize;
@@ -292,6 +343,10 @@ impl Hyperblobs {
 /// Cursor threaded through the stream [`Hyperblobs::read_stream`] returns.
 struct ReadState<'a> {
     core: &'a Hypercore,
+    /// Blob-relative offset of the range's first byte, until the block holding it has been
+    /// located. `None` once located, and for a range starting at byte zero, which needs no seek.
+    /// Locating costs a block read, so it happens on the stream's first poll rather than up front.
+    seek: Option<u64>,
     /// Index of the next hypercore block to read.
     index: u64,
     /// Byte offset within that block at which the wanted bytes start.
@@ -532,44 +587,137 @@ mod tests {
         );
         // The error terminates the stream rather than retrying the same block forever.
         assert!(stream.next().await.is_none());
+
+        // A range starting past byte zero has to read the blob's first block in order to seek, so
+        // it reports that block missing rather than the one it was aiming for.
+        let res = blobs.get(&missing, &opts(Some(5), None, None)).await;
+        assert!(
+            matches!(res, Err(Error::BlockNotAvailable(100))),
+            "expected BlockNotAvailable(100), got {res:?}"
+        );
         Ok(())
     }
 
-    /// Reading a blob with a `block_size` other than the one it was written with breaks the
-    /// arithmetic standing in for JS's `core.seek`. Both directions have to surface as an error
-    /// rather than an infinite loop or silently wrong bytes.
+    /// A range read must not depend on the *reader's* `block_size`, only on the size the blob was
+    /// actually written at. Both directions of mismatch used to error; now they read.
     #[tokio::test]
-    async fn read_stream_mismatched_block_size_errors() -> Result<()> {
-        // Written in 8 byte blocks, read as though blocks were 4 bytes: the read lands on block
-        // 1, which the core does not have.
-        let writer = ram_blobs(8).await;
-        let id = writer.put(b"abcdefgh", &Default::default()).await?;
-        assert_eq!(id.block_length, 1);
-        let reader = HyperblobsBuilder::default()
-            .block_size(4)
-            .core(writer.core)
-            .build()
-            .unwrap();
+    async fn read_stream_ignores_the_readers_block_size() -> Result<()> {
+        for (written_at, read_as) in [(8, 4), (4, 10), (3, 64), (64, 3)] {
+            let writer = ram_blobs(written_at).await;
+            let id = writer.put(b"abcdefgh", &Default::default()).await?;
+            let reader = HyperblobsBuilder::default()
+                .block_size(read_as)
+                .core(writer.core)
+                .build()
+                .unwrap();
 
-        let res = reader.get(&id, &opts(Some(4), None, None)).await;
-        assert!(
-            matches!(res, Err(Error::BlockNotAvailable(1))),
-            "expected BlockNotAvailable(1), got {res:?}"
+            let ctx = format!("written at {written_at}, read by a store set to {read_as}");
+            assert_eq!(
+                reader.get(&id, &Default::default()).await?,
+                b"abcdefgh",
+                "{ctx}"
+            );
+            assert_eq!(
+                reader.get(&id, &opts(Some(4), None, None)).await?,
+                b"efgh",
+                "{ctx}"
+            );
+            assert_eq!(
+                reader.get(&id, &opts(Some(5), None, None)).await?,
+                b"fgh",
+                "{ctx}"
+            );
+            assert_eq!(
+                reader.get(&id, &opts(Some(1), Some(6), None)).await?,
+                b"bcdefg",
+                "{ctx}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The same store can hold blobs chunked at different sizes, and reads back each one at the
+    /// size it was written at. This is JS's per-put `blockSize`.
+    #[tokio::test]
+    async fn put_honors_a_per_blob_block_size() -> Result<()> {
+        let blobs = ram_blobs(10).await;
+        let data = b"abcdefghijklmnopqrst"; // 20 bytes
+
+        let fine = blobs
+            .put(
+                data,
+                &PutOptions {
+                    block_size: Some(4),
+                },
+            )
+            .await?;
+        assert_eq!(fine.block_length, 5);
+        let coarse = blobs.put(data, &Default::default()).await?;
+        assert_eq!(coarse.block_length, 2);
+        // Zero means "unset", as in JS, rather than dividing by zero.
+        let zero = blobs
+            .put(
+                data,
+                &PutOptions {
+                    block_size: Some(0),
+                },
+            )
+            .await?;
+        assert_eq!(zero.block_length, 2);
+
+        for id in [&fine, &coarse, &zero] {
+            assert_eq!(blobs.get(id, &Default::default()).await?, data);
+            assert_eq!(blobs.get(id, &opts(Some(9), Some(4), None)).await?, b"jklm");
+            assert_eq!(blobs.get(id, &opts(Some(19), None, None)).await?, b"t");
+        }
+
+        // The finely chunked blob really is stored in 4 byte blocks.
+        assert_eq!(
+            chunks(&blobs, &fine, &Default::default()).await?,
+            vec![
+                b"abcd".to_vec(),
+                b"efgh".to_vec(),
+                b"ijkl".to_vec(),
+                b"mnop".to_vec(),
+                b"qrst".to_vec()
+            ]
         );
+        Ok(())
+    }
 
-        // Written in 4 byte blocks, read as though blocks were 10 bytes: the read lands on block
-        // 0 at offset 5, but that block holds only 4 bytes. Without the `take == 0` guard this
-        // makes no progress and loops forever.
-        let writer = ram_blobs(4).await;
-        let id = writer.put(b"abcdefgh", &Default::default()).await?;
-        assert_eq!(id.block_length, 2);
-        let reader = HyperblobsBuilder::default()
-            .block_size(10)
-            .core(writer.core)
-            .build()
-            .unwrap();
+    /// Recovering the block size from the blob's first block assumes uniform chunking, which
+    /// holds for anything `put` wrote but not for blocks appended by hand. A read that would make
+    /// no progress has to error rather than spin.
+    #[tokio::test]
+    async fn read_stream_reports_a_short_block_and_stops() -> Result<()> {
+        let blobs = ram_blobs(10).await;
+        // Deliberately non-uniform: 10, then 2, then 8.
+        blobs
+            .core()
+            .append_batch(&[vec![b'a'; 10], vec![b'b'; 2], vec![b'c'; 8]])
+            .await?;
+        let id = GetBlob {
+            block_offset: 0,
+            byte_length: 20,
+        };
 
-        let res = reader.get(&id, &opts(Some(5), None, None)).await;
+        // Byte 13 lands in block 1 at offset 3, but block 1 holds only 2 bytes.
+        let mut stream = std::pin::pin!(blobs.read_stream(&id, &opts(Some(13), None, None)));
+        let first = stream.next().await.expect("a chunk is yielded");
+        assert!(
+            matches!(first, Err(Error::ShortBlock(1))),
+            "expected ShortBlock(1), got {first:?}"
+        );
+        assert!(stream.next().await.is_none());
+
+        // An empty first block gives no block size to seek with.
+        let blobs = ram_blobs(10).await;
+        blobs.core().append_batch(&[vec![], vec![b'a'; 10]]).await?;
+        let id = GetBlob {
+            block_offset: 0,
+            byte_length: 10,
+        };
+        let res = blobs.get(&id, &opts(Some(1), None, None)).await;
         assert!(
             matches!(res, Err(Error::ShortBlock(0))),
             "expected ShortBlock(0), got {res:?}"

@@ -13,7 +13,7 @@
 mod common;
 
 use futures_lite::StreamExt;
-use hyperblobs::{GetOptions, Hyperblobs, HyperblobsBuilder, PutBlob};
+use hyperblobs::{GetOptions, Hyperblobs, HyperblobsBuilder, PutBlob, PutOptions};
 use hypercore::{HypercoreBuilder, Storage};
 use rusty_nodejs_repl::{Config, Repl};
 
@@ -148,9 +148,21 @@ fn js_opts(opts: &GetOptions) -> String {
     format!("{{{}}}", fields.join(","))
 }
 
-async fn js_put(repl: &mut Repl, blob: &[u8]) -> Result<PutBlob> {
+/// Format [`PutOptions`] as the JS options object.
+fn js_put_opts(opts: &PutOptions) -> String {
+    match opts.block_size {
+        Some(block_size) => format!("{{blockSize:{block_size}}}"),
+        None => "{}".to_string(),
+    }
+}
+
+async fn js_put(repl: &mut Repl, blob: &[u8], opts: &PutOptions) -> Result<PutBlob> {
     Ok(repl
-        .json_run(format!("outputJson(await blobs.put({}))", js_buffer(blob)))
+        .json_run(format!(
+            "outputJson(await blobs.put({}, {}))",
+            js_buffer(blob),
+            js_put_opts(opts)
+        ))
         .await?)
 }
 
@@ -245,7 +257,7 @@ async fn rust_read_stream(
 async fn js_writes_rust_reads(repl: &mut Repl) -> Result<(Hyperblobs, Vec<PutBlob>)> {
     let mut ids = vec![];
     for blob in fixture() {
-        ids.push(js_put(repl, &blob).await?);
+        ids.push(js_put(repl, &blob, &Default::default()).await?);
     }
     let blobs = ram_blobs().await?;
     blobs
@@ -277,7 +289,7 @@ async fn rust_and_js_put_the_same_blocks_and_ids() -> Result<()> {
     let blobs = ram_blobs().await?;
 
     for blob in fixture() {
-        let js = js_put(&mut repl, &blob).await?;
+        let js = js_put(&mut repl, &blob, &Default::default()).await?;
         let rs = blobs.put(&blob, &Default::default()).await?;
         // Compared as JSON so the `camelCase` field names are part of the assertion.
         assert_eq!(
@@ -364,6 +376,77 @@ async fn read_stream_emits_the_same_chunks_as_js() -> Result<()> {
         let js = js_read_stream(&mut repl, &ids[i], &o).await?;
         let rs = rust_read_stream(&blobs, &ids[i], &o).await?;
         assert_eq!(rs, js, "blob {i} streamed whole");
+    }
+
+    repl.stop().await?;
+    Ok(())
+}
+
+/// JS's per-put `blockSize`, which [`PutOptions::block_size`] is the port of. One store holds
+/// blobs chunked at a mix of sizes, and each reads back at the size it was written at rather than
+/// at the store's own.
+///
+/// This is the case that made `read_stream` stop consulting the store's `block_size` and recover
+/// the blob's own instead. Before that, the reads below with a non-zero `start` landed on the
+/// wrong block of the finely chunked blob and errored.
+#[tokio::test]
+async fn per_blob_block_size_round_trips_with_js() -> Result<()> {
+    let mut repl = start_repl().await?;
+    let blobs = ram_blobs().await?;
+
+    // 20 bytes chunked at 4, in a store whose own block size is 10.
+    let data: Vec<u8> = (b'a'..=b't').collect();
+    let fine = PutOptions {
+        block_size: Some(4),
+    };
+
+    let js_fine = js_put(&mut repl, &data, &fine).await?;
+    let rs_fine = blobs.put(&data, &fine).await?;
+    assert_eq!(
+        rs_fine.block_length, 5,
+        "the store's block size of {BLOCK_SIZE} was used instead of the per-blob one"
+    );
+    assert_eq!(
+        serde_json::to_value(&rs_fine)?,
+        serde_json::to_value(&js_fine)?
+    );
+
+    // A second blob at the store's own size, so the two sit back to back at different sizes and
+    // the finely chunked one is no longer the only thing in the core.
+    let js_coarse = js_put(&mut repl, &data, &Default::default()).await?;
+    let rs_coarse = blobs.put(&data, &Default::default()).await?;
+    assert_eq!(rs_coarse.block_length, 2);
+    assert_eq!(
+        serde_json::to_value(&rs_coarse)?,
+        serde_json::to_value(&js_coarse)?
+    );
+
+    assert_eq!(
+        rust_core_blocks(&blobs).await?,
+        js_core_blocks(&mut repl).await?
+    );
+
+    for (rs_id, js_id) in [(&rs_fine, &js_fine), (&rs_coarse, &js_coarse)] {
+        for o in [
+            opts(None, None, None),
+            opts(Some(9), Some(4), None),
+            opts(Some(4), None, None),
+            opts(Some(19), None, None),
+            opts(Some(2), None, Some(17)),
+        ] {
+            assert_eq!(
+                blobs.get(rs_id, &o).await?,
+                js_get(&mut repl, js_id, &o).await?,
+                "blob of {} blocks read with {o:?}",
+                rs_id.block_length
+            );
+            assert_eq!(
+                rust_read_stream(&blobs, rs_id, &o).await?,
+                js_read_stream(&mut repl, js_id, &o).await?,
+                "blob of {} blocks streamed with {o:?}",
+                rs_id.block_length
+            );
+        }
     }
 
     repl.stop().await?;
