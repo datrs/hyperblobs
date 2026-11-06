@@ -1,7 +1,17 @@
 [package]
 name = "hyperblobs"
 version = "0.1.0"
+license = "MIT OR Apache-2.0"
+description = "Peer to Peer blob store built on Hypercore"
+documentation = "https://docs.rs/hyperblobs"
+repository = "https://github.com/cowlicks/hyperblobs"
+readme = "README.md"
 edition = "2021"
+keywords = ["dat", "p2p", "blob", "hypercore"]
+categories = [
+  "asynchronous",
+  "data-structures",
+]
 
 [dependencies]
 derive_builder = "0.20.1"
