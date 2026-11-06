@@ -15,5 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+
+
+## [0.1.1] - 2026-11-06
+
+### Added
+
+### Changed
+
+### Removed
+
 <!-- next-url -->
-[Unreleased]: https://github.com/cowlicks/hyperblobs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cowlicks/hyperblobs/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/cowlicks/hyperblobs/compare/v0.1.0...v0.1.1

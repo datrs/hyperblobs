@@ -1,6 +1,6 @@
 [package]
 name = "hyperblobs"
-version = "0.1.0"
+version = "0.1.1"
 license = "MIT OR Apache-2.0"
 description = "Peer to Peer blob store built on Hypercore"
 documentation = "https://docs.rs/hyperblobs"
